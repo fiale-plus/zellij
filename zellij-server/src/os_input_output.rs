@@ -781,14 +781,12 @@ fn select_best_candidates(
 ) -> HashMap<String, Vec<String>> {
     let mut cmds = HashMap::new();
     for (ppid, children) in candidates {
-        let chosen = children
-            .iter()
-            .find(|(fg, _)| *fg)
-            .or(children.first())
-            .map(|(_, cmd)| cmd.clone());
-        if let Some(cmd) = chosen {
-            cmds.insert(ppid, cmd);
+        if children.is_empty() {
+            continue;
         }
+        let idx = children.iter().position(|(fg, _)| *fg).unwrap_or(0);
+        let (_, cmd) = children.into_iter().nth(idx).unwrap();
+        cmds.insert(ppid, cmd);
     }
     cmds
 }
