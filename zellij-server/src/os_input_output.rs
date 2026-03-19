@@ -548,9 +548,12 @@ impl ServerOsApi for ServerOsInputOutput {
     #[cfg(unix)]
     fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         // the key is the stringified ppid
-        let mut cmds = HashMap::new();
+        // We collect all children per ppid and prefer the foreground process
+        // (STAT contains '+') to avoid the last child in ps output silently
+        // overwriting earlier ones via HashMap::insert.
+        let mut candidates: HashMap<String, Vec<(bool, Vec<String>)>> = HashMap::new();
         if let Some(output) = Command::new("ps")
-            .args(vec!["-ao", "ppid,args"])
+            .args(vec!["-ao", "ppid,stat,args"])
             .output()
             .ok()
         {
@@ -564,7 +567,9 @@ impl ServerOsApi for ServerOsInputOutput {
                     .collect();
                 let mut line_parts = line_parts.into_iter();
                 let ppid = line_parts.next();
-                if let Some(ppid) = ppid {
+                let stat = line_parts.next();
+                if let (Some(ppid), Some(stat)) = (ppid, stat) {
+                    let is_foreground = stat.contains('+');
                     match &post_hook {
                         Some(post_hook) => {
                             let command: Vec<String> = line_parts.clone().collect();
@@ -581,16 +586,21 @@ impl ServerOsApi for ServerOsInputOutput {
                                 .split_ascii_whitespace()
                                 .map(|p| p.to_owned())
                                 .collect();
-                            cmds.insert(ppid.into(), line_parts);
+                            if !line_parts.is_empty() {
+                                candidates.entry(ppid).or_default().push((is_foreground, line_parts));
+                            }
                         },
                         None => {
-                            cmds.insert(ppid.into(), line_parts.collect());
+                            let parts: Vec<String> = line_parts.collect();
+                            if !parts.is_empty() {
+                                candidates.entry(ppid).or_default().push((is_foreground, parts));
+                            }
                         },
                     }
                 }
             }
         }
-        cmds
+        select_best_candidates(candidates)
     }
 
     #[cfg(not(unix))]
@@ -598,7 +608,10 @@ impl ServerOsApi for ServerOsInputOutput {
         let mut system_info = System::new();
         let refresh_kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
         system_info.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-        let mut cmds = HashMap::new();
+        // Use Vec to collect all children per ppid, same as the unix path,
+        // to avoid HashMap::insert silently overwriting earlier entries.
+        // STAT/foreground info is unavailable via sysinfo, so we use false.
+        let mut candidates: HashMap<String, Vec<(bool, Vec<String>)>> = HashMap::new();
         for (_pid, process) in system_info.processes() {
             if let Some(parent_pid) = process.parent() {
                 let ppid_str = format!("{}", parent_pid);
@@ -625,15 +638,17 @@ impl ServerOsApi for ServerOsInputOutput {
                             .split_ascii_whitespace()
                             .map(|p| p.to_owned())
                             .collect();
-                        cmds.insert(ppid_str, line_parts);
+                        if !line_parts.is_empty() {
+                            candidates.entry(ppid_str).or_default().push((false, line_parts));
+                        }
                     },
                     None => {
-                        cmds.insert(ppid_str, command);
+                        candidates.entry(ppid_str).or_default().push((false, command));
                     },
                 }
             }
         }
-        cmds
+        select_best_candidates(candidates)
     }
 
     fn write_to_file(&mut self, buf: String, name: Option<String>) -> Result<()> {
@@ -757,6 +772,25 @@ fn run_command_hook(
         return Err(format!("Hook failed: {}", String::from_utf8_lossy(&output.stderr)).into());
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Given a map of ppid -> [(is_foreground, command_args)], select the best
+/// candidate per ppid: prefer a foreground process, fall back to first child.
+fn select_best_candidates(
+    candidates: HashMap<String, Vec<(bool, Vec<String>)>>,
+) -> HashMap<String, Vec<String>> {
+    let mut cmds = HashMap::new();
+    for (ppid, children) in candidates {
+        let chosen = children
+            .iter()
+            .find(|(fg, _)| *fg)
+            .or(children.first())
+            .map(|(_, cmd)| cmd.clone());
+        if let Some(cmd) = chosen {
+            cmds.insert(ppid, cmd);
+        }
+    }
+    cmds
 }
 
 #[cfg(test)]

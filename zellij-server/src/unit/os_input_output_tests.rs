@@ -1,4 +1,5 @@
 use super::*;
+use super::select_best_candidates;
 use zellij_utils::input::command::RunCommand;
 
 fn make_server() -> ServerOsInputOutput {
@@ -200,4 +201,82 @@ fn spawn_and_read_output() {
         test_message,
         output_str
     );
+}
+
+// --- select_best_candidates tests ---
+
+fn candidates_from(entries: Vec<(&str, Vec<(bool, Vec<&str>)>)>) -> HashMap<String, Vec<(bool, Vec<String>)>> {
+    entries
+        .into_iter()
+        .map(|(ppid, children)| {
+            let children = children
+                .into_iter()
+                .map(|(fg, args)| (fg, args.into_iter().map(String::from).collect()))
+                .collect();
+            (ppid.to_string(), children)
+        })
+        .collect()
+}
+
+#[test]
+fn foreground_process_preferred_over_background_children() {
+    let candidates = candidates_from(vec![
+        ("1234", vec![
+            (true, vec!["claude", "--resume", "my-session"]),
+            (false, vec!["node", "/path/to/mcp-server"]),
+        ]),
+    ]);
+    let cmds = select_best_candidates(candidates);
+    assert_eq!(cmds.get("1234").unwrap(), &["claude", "--resume", "my-session"]);
+}
+
+#[test]
+fn background_process_listed_first_does_not_win() {
+    let candidates = candidates_from(vec![
+        ("1234", vec![
+            (false, vec!["node", "/path/to/mcp-server-1"]),
+            (false, vec!["node", "/path/to/mcp-server-2"]),
+            (true, vec!["claude", "--resume", "my-session"]),
+        ]),
+    ]);
+    let cmds = select_best_candidates(candidates);
+    assert_eq!(cmds.get("1234").unwrap(), &["claude", "--resume", "my-session"]);
+}
+
+#[test]
+fn single_child_returned_regardless_of_foreground() {
+    let candidates = candidates_from(vec![
+        ("5678", vec![(false, vec!["nvim", "main.rs"])]),
+    ]);
+    let cmds = select_best_candidates(candidates);
+    assert_eq!(cmds.get("5678").unwrap(), &["nvim", "main.rs"]);
+}
+
+#[test]
+fn multiple_ppids_handled_independently() {
+    let candidates = candidates_from(vec![
+        ("100", vec![
+            (false, vec!["node", "mcp-server"]),
+            (true, vec!["claude", "--resume", "foo"]),
+        ]),
+        ("200", vec![
+            (true, vec!["nvim", "bar.rs"]),
+            (false, vec!["node", "lsp-server"]),
+        ]),
+    ]);
+    let cmds = select_best_candidates(candidates);
+    assert_eq!(cmds.get("100").unwrap(), &["claude", "--resume", "foo"]);
+    assert_eq!(cmds.get("200").unwrap(), &["nvim", "bar.rs"]);
+}
+
+#[test]
+fn no_foreground_falls_back_to_first_child() {
+    let candidates = candidates_from(vec![
+        ("300", vec![
+            (false, vec!["node", "server-a"]),
+            (false, vec!["node", "server-b"]),
+        ]),
+    ]);
+    let cmds = select_best_candidates(candidates);
+    assert_eq!(cmds.get("300").unwrap(), &["node", "server-a"]);
 }
