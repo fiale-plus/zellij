@@ -282,15 +282,14 @@ impl SessionLayoutMetadata {
                     let mut command_line = command.iter();
                     if let Some(command_name) = command_line.next() {
                         let args: Vec<String> = command_line.map(|c| c.to_owned()).collect();
-                        if !Self::is_default_shell(self.default_shell.as_ref(), &command_name, &args)
+                        if Self::is_default_shell(self.default_shell.as_ref(), &command_name, &args)
                         {
+                            pane_layout_metadata.run = None;
+                        } else {
                             let mut run_command = RunCommand::new(PathBuf::from(command_name));
                             run_command.args = args;
                             pane_layout_metadata.run = Some(Run::Command(run_command));
                         }
-                        // else: don't clear a previously stored non-shell command;
-                        // a transient return to the shell shouldn't erase the
-                        // pane's saved command during periodic serialization.
                     }
                 }
             }
